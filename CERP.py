@@ -20,6 +20,7 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import roc_auc_score, confusion_matrix
 from typing import List, Tuple, Dict
+from tqdm import tqdm
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -314,18 +315,22 @@ def evaluate_cerp(
         print(f"Dataset: {X.shape[0]} samples, {X.shape[1]} features")
         print(f"Class distribution: Cancer={np.sum(y==1)}, Control={np.sum(y==0)}")
         print("=" * 60)
-    
-    for rep in range(n_repeats):
-        if verbose:
-            print(f"\nProcessing Repeat {rep + 1}/{n_repeats}...")
-        
+
+    # Progress bar for repeats
+    repeat_iter = tqdm(range(n_repeats), desc="Repeats", disable=not verbose)
+
+    for rep in repeat_iter:
         cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state + rep)
-        
+
         rep_y_true = []
         rep_y_pred = []
         rep_y_proba = []
-        
-        for fold, (train_idx, test_idx) in enumerate(cv.split(X, y)):
+
+        # Progress bar for folds
+        fold_iter = tqdm(enumerate(cv.split(X, y)), total=n_folds,
+                         desc=f"  Rep {rep+1} Folds", leave=False, disable=not verbose)
+
+        for fold, (train_idx, test_idx) in fold_iter:
             X_train, X_test = X[train_idx], X[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
             
