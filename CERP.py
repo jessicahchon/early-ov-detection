@@ -12,13 +12,14 @@ Implementation follows the original paper exactly:
 - CERP parameters: n_ensembles=15, tree_selection_threshold=0.90
 """
 
+import os
 import numpy as np
 import pandas as pd
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import roc_auc_score, confusion_matrix
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Dict
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -109,8 +110,12 @@ class CERPClassifier:
             ccp_alphas = ccp_alphas[indices]
         
         # Step 2: 10-fold CV to estimate error for each alpha
-        n_folds = min(10, min(np.bincount(y)))
-        cv = StratifiedKFold(n_splits=n_folds, shuffle=True, 
+        min_class_count = np.min(np.bincount(y))
+        if min_class_count < 2:
+            # Not enough samples for CV, return full tree
+            return full_tree
+        n_folds = min(10, min_class_count)
+        cv = StratifiedKFold(n_splits=n_folds, shuffle=True,
                             random_state=rng.integers(0, 2**31))
         
         cv_errors = []
@@ -239,37 +244,39 @@ class CERPClassifier:
         Predict using two-level majority voting:
         1. Majority vote within each ensemble
         2. Majority vote across ensembles
+
+        Note: Ties favor class 1 (Cancer) for higher sensitivity in early detection.
         """
         n_samples = X.shape[0]
         ensemble_preds = []
-        
+
         # Get prediction from each ensemble
         for trees, feature_sets in zip(self.ensembles_, self.feature_partitions_):
             votes = np.zeros(n_samples)
-            
+
             for tree, feats in zip(trees, feature_sets):
                 votes += tree.predict(X[:, feats])
-            
-            # Majority vote within ensemble
-            ensemble_pred = (votes > len(trees) / 2).astype(int)
+
+            # Majority vote within ensemble (ties favor Cancer)
+            ensemble_pred = (votes >= len(trees) / 2).astype(int)
             ensemble_preds.append(ensemble_pred)
-        
-        # Majority vote across ensembles
+
+        # Majority vote across ensembles (ties favor Cancer)
         ensemble_preds = np.array(ensemble_preds)
-        final_pred = (ensemble_preds.sum(axis=0) > self.n_ensembles / 2).astype(int)
-        
+        final_pred = (ensemble_preds.sum(axis=0) >= self.n_ensembles / 2).astype(int)
+
         return final_pred
     
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         """Return proportion of ensemble votes for probability estimation."""
         n_samples = X.shape[0]
         ensemble_preds = []
-        
+
         for trees, feature_sets in zip(self.ensembles_, self.feature_partitions_):
             votes = np.zeros(n_samples)
             for tree, feats in zip(trees, feature_sets):
                 votes += tree.predict(X[:, feats])
-            ensemble_pred = (votes > len(trees) / 2).astype(int)
+            ensemble_pred = (votes >= len(trees) / 2).astype(int)
             ensemble_preds.append(ensemble_pred)
         
         ensemble_preds = np.array(ensemble_preds)
@@ -386,7 +393,8 @@ def calculate_metrics(tn, fp, fn, tp, y_true=None, y_proba=None) -> Dict:
     if y_true is not None and y_proba is not None:
         try:
             auc = roc_auc_score(y_true, y_proba)
-        except:
+        except ValueError:
+            # Occurs when only one class is present in y_true
             pass
     
     return {
@@ -491,9 +499,15 @@ def print_final_summary(results: Dict, n_repeats: int, n_folds: int):
 if __name__ == "__main__":
     print("Ovarian Cancer Early Detection with CERP")
     print("=" * 60)
-    
+
     # Load data
-    df = pd.read_excel('final_ov.xlsx')
+    data_file = 'final_ov.xlsx'
+    if not os.path.exists(data_file):
+        print(f"Error: Data file '{data_file}' not found.")
+        print("Please ensure the file is in the current directory.")
+        exit(1)
+
+    df = pd.read_excel(data_file)
     
     # Extract labels
     y_labels = df['2 group class'].values
