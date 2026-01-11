@@ -287,6 +287,171 @@ class CERPClassifier:
 
 
 # =============================================================================
+# FAST R SCREENING (Quick search for optimal partition count)
+# =============================================================================
+
+def screen_optimal_r(
+    X: np.ndarray,
+    y: np.ndarray,
+    r_candidates: List[int] = None,
+    n_folds: int = 3,
+    n_ensembles: int = 5,
+    random_state: int = 42,
+    verbose: bool = True
+) -> Dict:
+    """
+    Fast screening to find optimal number of partitions (r).
+
+    Uses reduced CV folds and ensembles for speed.
+    Run this first, then use the best r for full evaluation.
+
+    Parameters
+    ----------
+    X, y : arrays
+    r_candidates : list of int, optional
+        Partition counts to test. Default: [3, 7, 11, 21, 31, 51, 71, 101]
+    n_folds : int, default=3
+        CV folds (fewer = faster)
+    n_ensembles : int, default=5
+        Ensembles per test (fewer = faster)
+    random_state : int
+    verbose : bool
+
+    Returns
+    -------
+    dict with 'best_r', 'results', and 'recommendation'
+    """
+    if r_candidates is None:
+        # Default: coarse grid of odd numbers
+        r_candidates = [3, 7, 11, 21, 31, 51, 71, 101]
+
+    # Filter candidates that are too large
+    max_r = X.shape[1] // 2
+    r_candidates = [r for r in r_candidates if r <= max_r]
+
+    if verbose:
+        print(f"\n{'='*60}")
+        print("FAST R SCREENING")
+        print(f"{'='*60}")
+        print(f"Testing r values: {r_candidates}")
+        print(f"Settings: {n_folds}-fold CV, {n_ensembles} ensembles (fast mode)")
+        print(f"{'='*60}\n")
+
+    results = []
+
+    # Scale data once
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    for r in tqdm(r_candidates, desc="Screening r", disable=not verbose):
+        cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+
+        fold_accs = []
+        fold_aucs = []
+        fold_sens = []
+        fold_spec = []
+
+        for train_idx, test_idx in cv.split(X_scaled, y):
+            X_train, X_test = X_scaled[train_idx], X_scaled[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+
+            # Quick CERP with fewer ensembles
+            clf = CERPClassifier(
+                n_ensembles=n_ensembles,
+                random_state=random_state
+            )
+            # Manually set partition count
+            clf.optimal_r_ = r
+            clf.n_partitions = r
+
+            # Modified fit with fixed r
+            clf.classes_ = np.unique(y_train)
+            rng = np.random.default_rng(random_state)
+            clf.ensembles_ = []
+            clf.feature_partitions_ = []
+
+            n_features = X_train.shape[1]
+            for _ in range(n_ensembles):
+                # Create partitions
+                indices = rng.permutation(n_features)
+                subset_size = max(1, n_features // r)
+                partitions = []
+                for i in range(0, n_features, subset_size):
+                    part = indices[i:i + subset_size]
+                    if len(part) >= 1:
+                        partitions.append(part)
+
+                # Build trees (simplified - no pruning for speed)
+                trees = []
+                features = []
+                for part in partitions:
+                    tree = DecisionTreeClassifier(
+                        min_samples_leaf=5,
+                        random_state=rng.integers(0, 2**31)
+                    )
+                    tree.fit(X_train[:, part], y_train)
+                    trees.append(tree)
+                    features.append(part)
+
+                clf.ensembles_.append(trees)
+                clf.feature_partitions_.append(features)
+
+            # Predict
+            y_pred = clf.predict(X_test)
+            y_proba = clf.predict_proba(X_test)[:, 1]
+
+            # Metrics
+            fold_accs.append(np.mean(y_pred == y_test))
+            try:
+                fold_aucs.append(roc_auc_score(y_test, y_proba))
+            except ValueError:
+                fold_aucs.append(0.5)
+
+            tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
+            fold_sens.append(tp / (tp + fn) if (tp + fn) > 0 else 0)
+            fold_spec.append(tn / (tn + fp) if (tn + fp) > 0 else 0)
+
+        result = {
+            'r': r,
+            'accuracy': np.mean(fold_accs),
+            'auc': np.mean(fold_aucs),
+            'sensitivity': np.mean(fold_sens),
+            'specificity': np.mean(fold_spec),
+            'acc_std': np.std(fold_accs)
+        }
+        results.append(result)
+
+        if verbose:
+            print(f"  r={r:3d}: AUC={result['auc']:.4f}, "
+                  f"Acc={result['accuracy']:.4f}, "
+                  f"Sens={result['sensitivity']:.4f}, "
+                  f"Spec={result['specificity']:.4f}")
+
+    # Find best r (by AUC, then accuracy)
+    best_result = max(results, key=lambda x: (x['auc'], x['accuracy']))
+    best_r = best_result['r']
+
+    # Recommendation
+    if verbose:
+        print(f"\n{'='*60}")
+        print("SCREENING RESULTS")
+        print(f"{'='*60}")
+        print(f"Best r = {best_r} (AUC={best_result['auc']:.4f})")
+        print(f"\nTop 3 candidates:")
+        sorted_results = sorted(results, key=lambda x: x['auc'], reverse=True)[:3]
+        for res in sorted_results:
+            print(f"  r={res['r']:3d}: AUC={res['auc']:.4f}, Acc={res['accuracy']:.4f}")
+        print(f"\nRecommendation: Run full evaluation with r={best_r}")
+        print(f"{'='*60}")
+
+    return {
+        'best_r': best_r,
+        'best_result': best_result,
+        'all_results': results
+    }
+
+
+# =============================================================================
 # EVALUATION PIPELINE (Original Paper: 20 reps × 10-fold CV)
 # =============================================================================
 
